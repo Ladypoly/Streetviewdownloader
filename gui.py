@@ -7,66 +7,188 @@ from tkinter import filedialog, ttk
 from pathlib import Path
 
 from svdownloader.metadata import get_metadata, search_panoramas
+from svdownloader.area import find_area_panoramas, find_radius_panoramas
+from svdownloader.route import find_route_panoramas
 from svdownloader.stitcher import crop_black_borders, save_panorama, stitch_panorama
 from svdownloader.tiles import download_tiles_async
-from svdownloader.utils import parse_input, sanitize_filename
+from svdownloader.utils import parse_input, resolve_to_coords, sanitize_filename
 
 
 class App:
     def __init__(self, root: tk.Tk):
         root.title("Street View Downloader")
-        root.geometry("620x520")
+        root.geometry("640x620")
         root.resizable(False, False)
+        self.root = root
 
-        # --- Input area ---
-        tk.Label(root, text="Paste URLs, pano IDs, or coordinates (one per line):").pack(
-            anchor="w", padx=10, pady=(10, 2)
-        )
-        self.text = tk.Text(root, height=12, width=72)
-        self.text.pack(padx=10)
+        # --- Tabs ---
+        notebook = ttk.Notebook(root)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
 
-        # --- Options row ---
+        batch_tab = tk.Frame(notebook)
+        route_tab = tk.Frame(notebook)
+        area_tab = tk.Frame(notebook)
+        notebook.add(batch_tab, text="  Batch Download  ")
+        notebook.add(route_tab, text="  Route Download  ")
+        notebook.add(area_tab, text="  Area Download  ")
+
+        self._build_batch_tab(batch_tab)
+        self._build_route_tab(route_tab)
+        self._build_area_tab(area_tab)
+
+        # --- Shared options ---
         opts = tk.Frame(root)
-        opts.pack(fill="x", padx=10, pady=8)
+        opts.pack(fill="x", padx=10, pady=6)
 
         tk.Label(opts, text="Output folder:").pack(side="left")
         self.folder_var = tk.StringVar(value=str(Path.home() / "Pictures" / "StreetView"))
-        tk.Entry(opts, textvariable=self.folder_var, width=35).pack(side="left", padx=4)
+        tk.Entry(opts, textvariable=self.folder_var, width=30).pack(side="left", padx=4)
         tk.Button(opts, text="Browse", command=self._browse).pack(side="left")
 
         tk.Label(opts, text="  Zoom:").pack(side="left")
         self.zoom_var = tk.IntVar(value=5)
-        zoom_spin = tk.Spinbox(opts, from_=0, to=5, textvariable=self.zoom_var, width=3)
-        zoom_spin.pack(side="left", padx=2)
+        tk.Spinbox(opts, from_=0, to=5, textvariable=self.zoom_var, width=3).pack(side="left", padx=2)
 
         tk.Label(opts, text="  Format:").pack(side="left")
         self.fmt_var = tk.StringVar(value="jpeg")
         ttk.Combobox(opts, textvariable=self.fmt_var, values=["jpeg", "png"], width=5, state="readonly").pack(side="left", padx=2)
 
-        # --- Buttons ---
-        btn_row = tk.Frame(root)
-        btn_row.pack(pady=6)
-        self.dl_btn = tk.Button(btn_row, text="Download All", width=16, command=self._start)
-        self.dl_btn.pack(side="left", padx=4)
-        tk.Button(btn_row, text="Clear", width=8, command=self._clear).pack(side="left", padx=4)
-
         # --- Progress ---
-        self.progress = ttk.Progressbar(root, length=580, mode="determinate")
+        self.progress = ttk.Progressbar(root, length=600, mode="determinate")
         self.progress.pack(padx=10, pady=(4, 2))
 
         # --- Log ---
-        self.log = tk.Text(root, height=8, width=72, state="disabled", bg="#f4f4f4")
+        self.log = tk.Text(root, height=10, width=76, state="disabled", bg="#f4f4f4")
         self.log.pack(padx=10, pady=(2, 10))
 
-        self.root = root
+    # ── Batch tab ──
+
+    def _build_batch_tab(self, parent):
+        tk.Label(parent, text="Paste URLs, pano IDs, or coordinates (one per line):").pack(
+            anchor="w", padx=8, pady=(8, 2)
+        )
+        self.text = tk.Text(parent, height=10, width=72)
+        self.text.pack(padx=8)
+
+        btn_row = tk.Frame(parent)
+        btn_row.pack(pady=6)
+        self.batch_dl_btn = tk.Button(btn_row, text="Download All", width=16, command=self._start_batch)
+        self.batch_dl_btn.pack(side="left", padx=4)
+        tk.Button(btn_row, text="Clear", width=8, command=self._clear_batch).pack(side="left", padx=4)
+
+    # ── Route tab ──
+
+    def _build_route_tab(self, parent):
+        frm = tk.Frame(parent)
+        frm.pack(fill="x", padx=8, pady=(10, 4))
+
+        tk.Label(frm, text="Start (lat,lon or URL):").grid(row=0, column=0, sticky="w", pady=4)
+        self.route_start = tk.Entry(frm, width=55)
+        self.route_start.grid(row=0, column=1, padx=4, pady=4)
+
+        tk.Label(frm, text="End (lat,lon or URL):").grid(row=1, column=0, sticky="w", pady=4)
+        self.route_end = tk.Entry(frm, width=55)
+        self.route_end.grid(row=1, column=1, padx=4, pady=4)
+
+        tk.Label(frm, text="Interval (meters):").grid(row=2, column=0, sticky="w", pady=4)
+        self.interval_var = tk.IntVar(value=20)
+        tk.Spinbox(frm, from_=5, to=200, textvariable=self.interval_var, width=6).grid(row=2, column=1, sticky="w", padx=4, pady=4)
+
+        btn_row = tk.Frame(parent)
+        btn_row.pack(pady=6)
+        self.route_find_btn = tk.Button(btn_row, text="Find Panoramas", width=16, command=self._start_route_find)
+        self.route_find_btn.pack(side="left", padx=4)
+        self.route_dl_btn = tk.Button(btn_row, text="Download All", width=16, command=self._start_route_dl, state="disabled")
+        self.route_dl_btn.pack(side="left", padx=4)
+
+        # Panorama list display
+        self.route_info = tk.Label(parent, text="Enter start and end points, then click Find Panoramas.", anchor="w")
+        self.route_info.pack(fill="x", padx=8, pady=(2, 4))
+
+        self._route_panos = []
+
+    # ── Area tab ──
+
+    def _build_area_tab(self, parent):
+        # Mode selector
+        mode_frm = tk.Frame(parent)
+        mode_frm.pack(fill="x", padx=8, pady=(8, 2))
+        self.area_mode = tk.StringVar(value="bbox")
+        tk.Radiobutton(mode_frm, text="Bounding box (two corners)", variable=self.area_mode, value="bbox", command=self._toggle_area_mode).pack(side="left")
+        tk.Radiobutton(mode_frm, text="Radius around point", variable=self.area_mode, value="radius", command=self._toggle_area_mode).pack(side="left", padx=12)
+
+        frm = tk.Frame(parent)
+        frm.pack(fill="x", padx=8, pady=(4, 4))
+
+        # Bbox fields
+        self.area_nw_lbl = tk.Label(frm, text="NW corner (lat,lon or URL):")
+        self.area_nw_lbl.grid(row=0, column=0, sticky="w", pady=4)
+        self.area_nw = tk.Entry(frm, width=55)
+        self.area_nw.grid(row=0, column=1, padx=4, pady=4)
+
+        self.area_se_lbl = tk.Label(frm, text="SE corner (lat,lon or URL):")
+        self.area_se_lbl.grid(row=1, column=0, sticky="w", pady=4)
+        self.area_se = tk.Entry(frm, width=55)
+        self.area_se.grid(row=1, column=1, padx=4, pady=4)
+
+        # Radius fields (hidden by default)
+        self.area_center_lbl = tk.Label(frm, text="Center (lat,lon or URL):")
+        self.area_center = tk.Entry(frm, width=55)
+        self.area_radius_lbl = tk.Label(frm, text="Radius (meters):")
+        self.area_radius_var = tk.IntVar(value=200)
+        self.area_radius_spin = tk.Spinbox(frm, from_=50, to=5000, textvariable=self.area_radius_var, width=8)
+
+        tk.Label(frm, text="Grid spacing (meters):").grid(row=4, column=0, sticky="w", pady=4)
+        self.spacing_var = tk.IntVar(value=50)
+        tk.Spinbox(frm, from_=20, to=200, textvariable=self.spacing_var, width=6).grid(row=4, column=1, sticky="w", padx=4, pady=4)
+
+        self._area_frm = frm
+
+        btn_row = tk.Frame(parent)
+        btn_row.pack(pady=6)
+        self.area_find_btn = tk.Button(btn_row, text="Find Panoramas", width=16, command=self._start_area_find)
+        self.area_find_btn.pack(side="left", padx=4)
+        self.area_dl_btn = tk.Button(btn_row, text="Download All", width=16, command=self._start_area_dl, state="disabled")
+        self.area_dl_btn.pack(side="left", padx=4)
+
+        self.area_info = tk.Label(parent, text="Choose a mode, enter coordinates, then click Find Panoramas.", anchor="w")
+        self.area_info.pack(fill="x", padx=8, pady=(2, 4))
+
+        self._area_panos = []
+        self._toggle_area_mode()  # set initial visibility
+
+    def _toggle_area_mode(self):
+        if self.area_mode.get() == "bbox":
+            self.area_nw_lbl.grid(row=0, column=0, sticky="w", pady=4)
+            self.area_nw.grid(row=0, column=1, padx=4, pady=4)
+            self.area_se_lbl.grid(row=1, column=0, sticky="w", pady=4)
+            self.area_se.grid(row=1, column=1, padx=4, pady=4)
+            self.area_center_lbl.grid_forget()
+            self.area_center.grid_forget()
+            self.area_radius_lbl.grid_forget()
+            self.area_radius_spin.grid_forget()
+        else:
+            self.area_nw_lbl.grid_forget()
+            self.area_nw.grid_forget()
+            self.area_se_lbl.grid_forget()
+            self.area_se.grid_forget()
+            self.area_center_lbl.grid(row=0, column=0, sticky="w", pady=4)
+            self.area_center.grid(row=0, column=1, padx=4, pady=4)
+            self.area_radius_lbl.grid(row=1, column=0, sticky="w", pady=4)
+            self.area_radius_spin.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+
+    # ── Shared helpers ──
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.folder_var.get())
         if d:
             self.folder_var.set(d)
 
-    def _clear(self):
+    def _clear_batch(self):
         self.text.delete("1.0", "end")
+        self._clear_log()
+
+    def _clear_log(self):
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
         self.log.config(state="disabled")
@@ -78,17 +200,22 @@ class App:
         self.log.see("end")
         self.log.config(state="disabled")
 
-    def _start(self):
+    def _advance(self):
+        self.progress["value"] += 1
+
+    # ── Batch download ──
+
+    def _start_batch(self):
         lines = [l.strip() for l in self.text.get("1.0", "end").splitlines() if l.strip()]
         if not lines:
             self._log("Nothing to download — paste some URLs first.")
             return
-        self.dl_btn.config(state="disabled")
-        self.progress["value"] = 0
+        self.batch_dl_btn.config(state="disabled")
+        self._clear_log()
         self.progress["maximum"] = len(lines)
-        threading.Thread(target=self._run, args=(lines,), daemon=True).start()
+        threading.Thread(target=self._run_batch, args=(lines,), daemon=True).start()
 
-    def _run(self, lines: list[str]):
+    def _run_batch(self, lines: list[str]):
         out = Path(self.folder_var.get())
         out.mkdir(parents=True, exist_ok=True)
         zoom = self.zoom_var.get()
@@ -98,9 +225,7 @@ class App:
         for i, line in enumerate(lines, 1):
             self.root.after(0, self._log, f"[{i}/{len(lines)}] {line}")
             try:
-                result = asyncio.run(
-                    _download(line, out, zoom, fmt)
-                )
+                result = asyncio.run(_download(line, out, zoom, fmt))
                 if result:
                     self.root.after(0, self._log, f"  -> {result}")
                     ok += 1
@@ -111,11 +236,206 @@ class App:
             self.root.after(0, self._advance)
 
         self.root.after(0, self._log, f"\nDone: {ok}/{len(lines)} downloaded to {out}")
-        self.root.after(0, lambda: self.dl_btn.config(state="normal"))
+        self.root.after(0, lambda: self.batch_dl_btn.config(state="normal"))
 
-    def _advance(self):
-        self.progress["value"] += 1
+    # ── Route find ──
 
+    def _start_route_find(self):
+        start_str = self.route_start.get().strip()
+        end_str = self.route_end.get().strip()
+        if not start_str or not end_str:
+            self._log("Please enter both start and end points.")
+            return
+        self.route_find_btn.config(state="disabled")
+        self.route_dl_btn.config(state="disabled")
+        self._clear_log()
+        self.route_info.config(text="Searching for route and panoramas...")
+        threading.Thread(target=self._run_route_find, args=(start_str, end_str), daemon=True).start()
+
+    def _run_route_find(self, start_str: str, end_str: str):
+        try:
+            start = resolve_to_coords(start_str)
+            end = resolve_to_coords(end_str)
+        except ValueError as e:
+            self.root.after(0, self._log, f"Error: {e}")
+            self.root.after(0, lambda: self.route_find_btn.config(state="normal"))
+            return
+
+        self.root.after(0, self._log, f"Routing from ({start[0]:.4f}, {start[1]:.4f}) to ({end[0]:.4f}, {end[1]:.4f})...")
+
+        try:
+            panos = find_route_panoramas(start, end, interval_m=self.interval_var.get())
+        except Exception as e:
+            self.root.after(0, self._log, f"Route error: {e}")
+            self.root.after(0, lambda: self.route_find_btn.config(state="normal"))
+            return
+
+        self._route_panos = panos
+        count = len(panos)
+        self.root.after(0, self._log, f"Found {count} unique panoramas along route.")
+        self.root.after(0, lambda: self.route_info.config(text=f"Found {count} panoramas. Click 'Download All' to save them."))
+        self.root.after(0, lambda: self.route_find_btn.config(state="normal"))
+        if count > 0:
+            self.root.after(0, lambda: self.route_dl_btn.config(state="normal"))
+
+    # ── Route download ──
+
+    def _start_route_dl(self):
+        if not self._route_panos:
+            return
+        self.route_dl_btn.config(state="disabled")
+        self.route_find_btn.config(state="disabled")
+        self._clear_log()
+        self.progress["maximum"] = len(self._route_panos)
+        threading.Thread(target=self._run_route_dl, daemon=True).start()
+
+    def _run_route_dl(self):
+        base = Path(self.folder_var.get())
+        start_str = self.route_start.get().strip().replace(",", "_").replace(" ", "")[:20]
+        end_str = self.route_end.get().strip().replace(",", "_").replace(" ", "")[:20]
+        out = base / f"route_{start_str}_to_{end_str}"
+        out.mkdir(parents=True, exist_ok=True)
+        zoom = self.zoom_var.get()
+        fmt = self.fmt_var.get()
+        panos = self._route_panos
+
+        ok = 0
+        for i, pano in enumerate(panos, 1):
+            self.root.after(0, self._log, f"[{i}/{len(panos)}] {pano.pano_id}")
+            try:
+                result = asyncio.run(_download_by_id(pano.pano_id, out, zoom, fmt))
+                if result:
+                    self.root.after(0, self._log, f"  -> {result}")
+                    ok += 1
+                else:
+                    self.root.after(0, self._log, "  -> FAILED")
+            except Exception as e:
+                self.root.after(0, self._log, f"  -> ERROR: {e}")
+            self.root.after(0, self._advance)
+
+        self.root.after(0, self._log, f"\nDone: {ok}/{len(panos)} route panoramas downloaded to {out}")
+        self.root.after(0, lambda: self.route_dl_btn.config(state="normal"))
+        self.root.after(0, lambda: self.route_find_btn.config(state="normal"))
+
+    # ── Area find ──
+
+    def _start_area_find(self):
+        self.area_find_btn.config(state="disabled")
+        self.area_dl_btn.config(state="disabled")
+        self._clear_log()
+        self.area_info.config(text="Scanning area for panoramas...")
+
+        if self.area_mode.get() == "radius":
+            center_str = self.area_center.get().strip()
+            if not center_str:
+                self._log("Please enter a center point.")
+                self.area_find_btn.config(state="normal")
+                return
+            threading.Thread(target=self._run_radius_find, args=(center_str,), daemon=True).start()
+        else:
+            nw_str = self.area_nw.get().strip()
+            se_str = self.area_se.get().strip()
+            if not nw_str or not se_str:
+                self._log("Please enter both NW and SE corners.")
+                self.area_find_btn.config(state="normal")
+                return
+            threading.Thread(target=self._run_area_find, args=(nw_str, se_str), daemon=True).start()
+
+    def _run_area_find(self, nw_str: str, se_str: str):
+        try:
+            nw = resolve_to_coords(nw_str)
+            se = resolve_to_coords(se_str)
+        except ValueError as e:
+            self.root.after(0, self._log, f"Error: {e}")
+            self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
+            return
+
+        north, south = max(nw[0], se[0]), min(nw[0], se[0])
+        east, west = max(nw[1], se[1]), min(nw[1], se[1])
+
+        self.root.after(0, self._log, f"Scanning area ({north:.4f},{west:.4f}) to ({south:.4f},{east:.4f})...")
+
+        try:
+            panos = find_area_panoramas(north, south, east, west, spacing_m=self.spacing_var.get())
+        except Exception as e:
+            self.root.after(0, self._log, f"Area search error: {e}")
+            self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
+            return
+
+        self._finish_area_find(panos)
+
+    def _run_radius_find(self, center_str: str):
+        try:
+            center = resolve_to_coords(center_str)
+        except ValueError as e:
+            self.root.after(0, self._log, f"Error: {e}")
+            self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
+            return
+
+        try:
+            panos = find_radius_panoramas(center[0], center[1], radius_m=self.area_radius_var.get(), spacing_m=self.spacing_var.get())
+        except Exception as e:
+            self.root.after(0, self._log, f"Radius search error: {e}")
+            self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
+            return
+
+        self._finish_area_find(panos)
+
+    def _finish_area_find(self, panos):
+        self._area_panos = panos
+        count = len(panos)
+        self.root.after(0, self._log, f"Found {count} unique panoramas in area.")
+        self.root.after(0, lambda: self.area_info.config(text=f"Found {count} panoramas. Click 'Download All' to save them."))
+        self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
+        if count > 0:
+            self.root.after(0, lambda: self.area_dl_btn.config(state="normal"))
+
+    # ── Area download ──
+
+    def _start_area_dl(self):
+        if not self._area_panos:
+            return
+        self.area_dl_btn.config(state="disabled")
+        self.area_find_btn.config(state="disabled")
+        self._clear_log()
+        self.progress["maximum"] = len(self._area_panos)
+        threading.Thread(target=self._run_area_dl, daemon=True).start()
+
+    def _run_area_dl(self):
+        base = Path(self.folder_var.get())
+        if self.area_mode.get() == "radius":
+            center_str = self.area_center.get().strip().replace(",", "_").replace(" ", "")[:20]
+            radius = self.area_radius_var.get()
+            out = base / f"radius_{center_str}_{radius}m"
+        else:
+            nw_str = self.area_nw.get().strip().replace(",", "_").replace(" ", "")[:20]
+            se_str = self.area_se.get().strip().replace(",", "_").replace(" ", "")[:20]
+            out = base / f"area_{nw_str}_to_{se_str}"
+        out.mkdir(parents=True, exist_ok=True)
+        zoom = self.zoom_var.get()
+        fmt = self.fmt_var.get()
+        panos = self._area_panos
+
+        ok = 0
+        for i, pano in enumerate(panos, 1):
+            self.root.after(0, self._log, f"[{i}/{len(panos)}] {pano.pano_id}")
+            try:
+                result = asyncio.run(_download_by_id(pano.pano_id, out, zoom, fmt))
+                if result:
+                    self.root.after(0, self._log, f"  -> {result}")
+                    ok += 1
+                else:
+                    self.root.after(0, self._log, "  -> FAILED")
+            except Exception as e:
+                self.root.after(0, self._log, f"  -> ERROR: {e}")
+            self.root.after(0, self._advance)
+
+        self.root.after(0, self._log, f"\nDone: {ok}/{len(panos)} area panoramas downloaded to {out}")
+        self.root.after(0, lambda: self.area_dl_btn.config(state="normal"))
+        self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
+
+
+# ── Download helpers ──
 
 async def _download(input_str: str, out: Path, zoom: int, fmt: str) -> str | None:
     parsed = parse_input(input_str)
@@ -130,6 +450,10 @@ async def _download(input_str: str, out: Path, zoom: int, fmt: str) -> str | Non
     else:
         pano_id = parsed.value
 
+    return await _download_by_id(pano_id, out, zoom, fmt)
+
+
+async def _download_by_id(pano_id: str, out: Path, zoom: int, fmt: str) -> str | None:
     info = get_metadata(pano_id)
     z = min(zoom, info.max_zoom)
     cols, rows = info.grid_size(z)

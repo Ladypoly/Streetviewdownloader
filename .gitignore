@@ -15,3 +15,6 @@ env/
 !tests/fixtures/*
 .tox/
 .pytest_cache/
+.claude/
+claude-session*.json
+claude-session*.log

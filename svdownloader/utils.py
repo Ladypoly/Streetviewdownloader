@@ -56,6 +56,26 @@ def parse_input(input_str: str) -> ParsedInput:
     return ParsedInput(type="pano_id", value=input_str)
 
 
+def resolve_to_coords(input_str: str) -> tuple[float, float]:
+    """Resolve any input type to (lat, lon) coordinates."""
+    parsed = parse_input(input_str)
+
+    if parsed.type == "coords" and parsed.lat is not None and parsed.lon is not None:
+        return (parsed.lat, parsed.lon)
+
+    # URL with @lat,lon in it
+    if parsed.type == "url" or parsed.type == "pano_id":
+        # Check if the original string has coordinates in it
+        match = _MAPS_AT_PATTERN.search(input_str)
+        if match:
+            return (float(match.group(1)), float(match.group(2)))
+
+    raise ValueError(
+        f"Cannot extract coordinates from: {input_str}\n"
+        "Please use lat,lon format (e.g. 48.858,2.294)"
+    )
+
+
 def sanitize_filename(pano_id: str) -> str:
     """Make a pano ID safe for use as a filename."""
     return re.sub(r"[^\w\-]", "_", pano_id)
