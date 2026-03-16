@@ -12,12 +12,16 @@ from svdownloader.route import find_route_panoramas
 from svdownloader.stitcher import crop_black_borders, save_panorama, stitch_panorama
 from svdownloader.tiles import download_tiles_async
 from svdownloader.utils import parse_input, resolve_to_coords, sanitize_filename
+from svdownloader.tile_extractor import extract_tiles, get_grid_info
+from svdownloader.exif_writer import save_tile_with_exif
+
+_PANO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 
 class App:
     def __init__(self, root: tk.Tk):
         root.title("Street View Downloader")
-        root.geometry("640x620")
+        root.geometry("640x720")
         root.resizable(False, False)
         self.root = root
 
@@ -28,13 +32,16 @@ class App:
         batch_tab = tk.Frame(notebook)
         route_tab = tk.Frame(notebook)
         area_tab = tk.Frame(notebook)
+        splitter_tab = tk.Frame(notebook)
         notebook.add(batch_tab, text="  Batch Download  ")
         notebook.add(route_tab, text="  Route Download  ")
         notebook.add(area_tab, text="  Area Download  ")
+        notebook.add(splitter_tab, text="  Pano Splitter  ")
 
         self._build_batch_tab(batch_tab)
         self._build_route_tab(route_tab)
         self._build_area_tab(area_tab)
+        self._build_splitter_tab(splitter_tab)
 
         # --- Shared options ---
         opts = tk.Frame(root)
@@ -389,6 +396,176 @@ class App:
         self.root.after(0, lambda: self.area_find_btn.config(state="normal"))
         if count > 0:
             self.root.after(0, lambda: self.area_dl_btn.config(state="normal"))
+
+    # ── Pano Splitter tab ──
+
+    def _build_splitter_tab(self, parent):
+        frm = tk.Frame(parent)
+        frm.pack(fill="x", padx=8, pady=(8, 4))
+
+        # Input mode
+        tk.Label(frm, text="Input:").grid(row=0, column=0, sticky="w", pady=4)
+        mode_frm = tk.Frame(frm)
+        mode_frm.grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        self.splitter_input_mode = tk.StringVar(value="folder")
+        tk.Radiobutton(mode_frm, text="Folder", variable=self.splitter_input_mode, value="folder").pack(side="left")
+        tk.Radiobutton(mode_frm, text="Single file", variable=self.splitter_input_mode, value="file").pack(side="left", padx=8)
+
+        # Input path
+        tk.Label(frm, text="Input path:").grid(row=1, column=0, sticky="w", pady=4)
+        inp_frm = tk.Frame(frm)
+        inp_frm.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        self.splitter_input_var = tk.StringVar()
+        tk.Entry(inp_frm, textvariable=self.splitter_input_var, width=42).pack(side="left")
+        tk.Button(inp_frm, text="Browse", command=self._splitter_browse_input).pack(side="left", padx=4)
+
+        # Output path
+        tk.Label(frm, text="Output folder:").grid(row=2, column=0, sticky="w", pady=4)
+        out_frm = tk.Frame(frm)
+        out_frm.grid(row=2, column=1, sticky="w", padx=4, pady=4)
+        self.splitter_output_var = tk.StringVar()
+        tk.Entry(out_frm, textvariable=self.splitter_output_var, width=42).pack(side="left")
+        tk.Button(out_frm, text="Browse", command=self._splitter_browse_output).pack(side="left", padx=4)
+
+        # FOV
+        tk.Label(frm, text="FOV (degrees):").grid(row=3, column=0, sticky="w", pady=4)
+        self.splitter_fov_var = tk.IntVar(value=90)
+        tk.Spinbox(frm, from_=30, to=150, textvariable=self.splitter_fov_var, width=6,
+                   command=self._update_grid_preview).grid(row=3, column=1, sticky="w", padx=4, pady=4)
+
+        # Overlap
+        tk.Label(frm, text="Overlap (%):").grid(row=4, column=0, sticky="w", pady=4)
+        self.splitter_overlap_var = tk.IntVar(value=40)
+        tk.Spinbox(frm, from_=10, to=80, textvariable=self.splitter_overlap_var, width=6,
+                   command=self._update_grid_preview).grid(row=4, column=1, sticky="w", padx=4, pady=4)
+
+        # Tile size
+        tk.Label(frm, text="Tile size (px):").grid(row=5, column=0, sticky="w", pady=4)
+        self.splitter_size_var = tk.IntVar(value=1024)
+        ttk.Combobox(frm, textvariable=self.splitter_size_var, values=[512, 1024, 2048, 4096],
+                     width=6, state="readonly").grid(row=5, column=1, sticky="w", padx=4, pady=4)
+
+        # Pitch range
+        tk.Label(frm, text="Pitch range:").grid(row=6, column=0, sticky="w", pady=4)
+        pitch_frm = tk.Frame(frm)
+        pitch_frm.grid(row=6, column=1, sticky="w", padx=4, pady=4)
+        self.splitter_pitch_min_var = tk.IntVar(value=-60)
+        self.splitter_pitch_max_var = tk.IntVar(value=60)
+        tk.Spinbox(pitch_frm, from_=-90, to=0, textvariable=self.splitter_pitch_min_var, width=5,
+                   command=self._update_grid_preview).pack(side="left")
+        tk.Label(pitch_frm, text=" to ").pack(side="left")
+        tk.Spinbox(pitch_frm, from_=0, to=90, textvariable=self.splitter_pitch_max_var, width=5,
+                   command=self._update_grid_preview).pack(side="left")
+        tk.Label(pitch_frm, text=" degrees").pack(side="left")
+
+        # Grid preview
+        self.splitter_grid_info = tk.Label(frm, text="", anchor="w", fg="#555")
+        self.splitter_grid_info.grid(row=7, column=0, columnspan=2, sticky="w", padx=4, pady=(6, 2))
+
+        # Process button
+        btn_row = tk.Frame(parent)
+        btn_row.pack(pady=6)
+        self.splitter_btn = tk.Button(btn_row, text="Process", width=16, command=self._start_splitter)
+        self.splitter_btn.pack()
+
+        self._update_grid_preview()
+
+    def _splitter_browse_input(self):
+        if self.splitter_input_mode.get() == "file":
+            p = filedialog.askopenfilename(
+                filetypes=[("Images", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp"), ("All files", "*.*")]
+            )
+        else:
+            p = filedialog.askdirectory()
+        if p:
+            self.splitter_input_var.set(p)
+            if not self.splitter_output_var.get():
+                self.splitter_output_var.set(str(Path(p if self.splitter_input_mode.get() == "folder" else str(Path(p).parent)) / "tiles"))
+
+    def _splitter_browse_output(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.splitter_output_var.set(d)
+
+    def _update_grid_preview(self):
+        try:
+            info = get_grid_info(
+                fov_deg=float(self.splitter_fov_var.get()),
+                overlap=self.splitter_overlap_var.get() / 100,
+                pitch_range=(self.splitter_pitch_min_var.get(), self.splitter_pitch_max_var.get()),
+            )
+            self.splitter_grid_info.config(
+                text=f"Grid: {info['rows']} rows x {info['columns']} cols = {info['total_tiles']} tiles per image"
+            )
+        except Exception:
+            self.splitter_grid_info.config(text="Invalid settings")
+
+    def _start_splitter(self):
+        input_path = self.splitter_input_var.get().strip()
+        output_path = self.splitter_output_var.get().strip()
+        if not input_path:
+            self._log("Please select an input file or folder.")
+            return
+        if not output_path:
+            self._log("Please select an output folder.")
+            return
+
+        input_p = Path(input_path)
+        if self.splitter_input_mode.get() == "file":
+            if not input_p.is_file():
+                self._log(f"File not found: {input_path}")
+                return
+            images = [input_p]
+        else:
+            if not input_p.is_dir():
+                self._log(f"Folder not found: {input_path}")
+                return
+            images = [f for f in input_p.iterdir() if f.suffix.lower() in _PANO_EXTENSIONS]
+            if not images:
+                self._log("No image files found in the folder.")
+                return
+
+        self.splitter_btn.config(state="disabled")
+        self._clear_log()
+        self.progress["maximum"] = len(images)
+        threading.Thread(target=self._run_splitter, args=(images, Path(output_path)), daemon=True).start()
+
+    def _run_splitter(self, images: list, output_path: Path):
+        output_path.mkdir(parents=True, exist_ok=True)
+        fov = float(self.splitter_fov_var.get())
+        overlap = self.splitter_overlap_var.get() / 100
+        tile_size = int(self.splitter_size_var.get())
+        pitch_range = (self.splitter_pitch_min_var.get(), self.splitter_pitch_max_var.get())
+
+        ok = 0
+        total_tiles = 0
+        for i, img_path in enumerate(images, 1):
+            self.root.after(0, self._log, f"[{i}/{len(images)}] {img_path.name}")
+            try:
+                results = extract_tiles(
+                    equirect_path=img_path,
+                    output_dir=output_path,
+                    fov_deg=fov,
+                    overlap=overlap,
+                    tile_size=tile_size,
+                    pitch_range=pitch_range,
+                )
+                for tile_path, tile_array, tile_info in results:
+                    save_tile_with_exif(
+                        tile_array=tile_array,
+                        output_path=tile_path,
+                        focal_length_mm=tile_info.focal_length_mm,
+                        fov_deg=tile_info.fov_deg,
+                    )
+                total_tiles += len(results)
+                self.root.after(0, self._log, f"  -> {len(results)} tiles extracted")
+                ok += 1
+            except Exception as e:
+                self.root.after(0, self._log, f"  -> ERROR: {e}")
+            self.root.after(0, self._advance)
+
+        self.root.after(0, self._log, f"\nDone: {total_tiles} tiles from {ok}/{len(images)} images -> {output_path}")
+        self.root.after(0, lambda: self.splitter_btn.config(state="normal"))
 
     # ── Area download ──
 
